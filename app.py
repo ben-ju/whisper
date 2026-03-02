@@ -54,11 +54,14 @@ def _send_paste():
     ctypes.windll.user32.SendInput(4, ctypes.byref(seq), ctypes.sizeof(INPUT))
 
 # ─── Config (edit these to customise) ────────────────────────────────────────
-HOTKEY      = "ctrl+space"
-MODEL_SIZE  = "large-v3"   # tiny · base · small · medium · large-v3
+HOTKEY      = "ctrl+space"        # English transcription
+HOTKEY_FR   = "ctrl+shift+space"  # French transcription
+HOTKEY_ESC  = "escape"            # cancel recording / transcription
+MODEL_SIZE  = "medium"     # tiny · base · small · medium · large-v3
 #                        tiny=fastest/least accurate, large-v3=slowest/best
 SAMPLE_RATE = 16000
 AUTO_PASTE  = True     # paste transcription automatically with Ctrl+V
+PASTE_DELAY = 0.05     # seconds to wait before sending Ctrl+V
 MAX_RECORD  = 120      # safety cap: auto-stop after this many seconds
 
 
@@ -143,8 +146,9 @@ class Overlay:
             self._dot.configure(fg=self._COLORS["processing"])
 
         elif cmd == "recording":
+            lang_label = msg[1] if len(msg) > 1 else "EN"
             r.deiconify()
-            self._status.set("Recording…")
+            self._status.set(f"Recording… [{lang_label}]")
             self._dot.configure(fg=self._COLORS["recording"])
             self._pulse = True
             self._do_pulse()
@@ -162,6 +166,12 @@ class Overlay:
             self._dot.configure(fg=self._COLORS["idle"])
             r.after(2500, r.withdraw)
 
+        elif cmd == "cancelled":
+            self._pulse = False
+            self._status.set("Annulé")
+            self._dot.configure(fg=self._COLORS["idle"])
+            r.after(1200, r.withdraw)
+
         elif cmd == "hide":
             self._pulse = False
             r.withdraw()
@@ -178,11 +188,12 @@ class Overlay:
 
     # ── public thread-safe signals ─────────────────────────────────────────────
 
-    def signal_loading(self):            self._q.put(("loading",))
-    def signal_recording(self):          self._q.put(("recording",))
-    def signal_processing(self):         self._q.put(("processing",))
-    def signal_done(self, text: str):    self._q.put(("done", text))
-    def signal_hide(self):               self._q.put(("hide",))
+    def signal_loading(self):                        self._q.put(("loading",))
+    def signal_recording(self, lang: str = "EN"):   self._q.put(("recording", lang))
+    def signal_processing(self):                    self._q.put(("processing",))
+    def signal_done(self, text: str):               self._q.put(("done", text))
+    def signal_cancelled(self):                     self._q.put(("cancelled",))
+    def signal_hide(self):                          self._q.put(("hide",))
 
 
 # ─── Audio recorder ───────────────────────────────────────────────────────────
@@ -238,9 +249,9 @@ class Transcriber:
     def ready(self) -> bool:
         return self._ready.is_set()
 
-    def transcribe(self, audio: np.ndarray) -> str:
+    def transcribe(self, audio: np.ndarray, language: str = "en") -> str:
         self._ready.wait()
-        segs, _ = self.model.transcribe(audio, beam_size=5, language="en")
+        segs, _ = self.model.transcribe(audio, beam_size=5, language=language)
         return " ".join(s.text for s in segs).strip()
 
 
@@ -251,24 +262,35 @@ class App:
         self.recorder    = Recorder()
         self.transcriber = Transcriber()
         self._recording  = False
+        self._cancelled  = False
         self._lock       = threading.Lock()
 
     # called from keyboard hook thread
-    def _on_hotkey(self):
+    def _on_escape(self):
+        with self._lock:
+            if not self._recording:
+                return  # nothing active — let Escape pass through normally
+            self._cancelled = True
+            self.recorder.active = False   # stop audio capture immediately
+
+    def _on_hotkey(self, language: str = "en"):
         with self._lock:
             if not self.transcriber.ready:
                 return  # model still loading — ignore
             if self._recording:
                 self.recorder.active = False   # signal the session thread to stop
                 return
-            self._recording = True
+            self._recording  = True
+            self._cancelled  = False
 
-        threading.Thread(target=self._session, daemon=True, name="session").start()
+        threading.Thread(target=self._session, args=(language,),
+                         daemon=True, name="session").start()
 
-    def _session(self):
+    def _session(self, language: str = "en"):
+        lang_label = "FR" if language == "fr" else "EN"
         try:
             self.recorder.start()
-            self.overlay.signal_recording()
+            self.overlay.signal_recording(lang_label)
 
             deadline = time.time() + MAX_RECORD
             while self.recorder.active and time.time() < deadline:
@@ -276,18 +298,29 @@ class App:
 
             audio = self.recorder.stop()
 
+            # Escape was pressed — discard everything
+            if self._cancelled:
+                self.overlay.signal_cancelled()
+                return
+
             if audio is None or len(audio) < SAMPLE_RATE * 0.2:   # < 0.2 s
                 self.overlay.signal_done("")
                 return
 
             self.overlay.signal_processing()
-            text = self.transcriber.transcribe(audio)
-            print(f"[CodeWhisper] {text!r}")
+            text = self.transcriber.transcribe(audio, language=language)
+
+            # Escape pressed while transcribing — discard result silently
+            if self._cancelled:
+                self.overlay.signal_cancelled()
+                return
+
+            print(f"[CodeWhisper/{lang_label}] {text!r}")
 
             if text:
                 pyperclip.copy(text)
                 if AUTO_PASTE:
-                    time.sleep(0.25)          # let hotkey release + focus settle
+                    time.sleep(PASTE_DELAY)   # let hotkey release + focus settle
                     _send_paste()
 
             self.overlay.signal_done(text)
@@ -306,8 +339,11 @@ class App:
         self.overlay.signal_loading()
         self.transcriber.load_async(on_ready=self.overlay.signal_hide)
 
-        # Global hotkey (suppress=True so it doesn't reach the active app)
-        keyboard.add_hotkey(HOTKEY, self._on_hotkey, suppress=True)
+        # Global hotkeys (suppress=True so they don't reach the active app)
+        keyboard.add_hotkey(HOTKEY,    self._on_hotkey,                        suppress=True)
+        keyboard.add_hotkey(HOTKEY_FR, lambda: self._on_hotkey(language="fr"), suppress=True)
+        # Escape: suppress=False so it still works normally in other apps
+        keyboard.add_hotkey(HOTKEY_ESC, self._on_escape, suppress=False)
 
         # System tray — run() blocks the main thread until "Quit" is clicked
         def _quit(icon, _):
@@ -316,7 +352,9 @@ class App:
         menu = pystray.Menu(
             pystray.MenuItem("CodeWhisper", None, enabled=False),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem(f"Hotkey: {HOTKEY}", None, enabled=False),
+            pystray.MenuItem(f"English: {HOTKEY}",    None, enabled=False),
+            pystray.MenuItem(f"French:  {HOTKEY_FR}", None, enabled=False),
+            pystray.MenuItem(f"Cancel:  {HOTKEY_ESC}", None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", _quit),
         )
