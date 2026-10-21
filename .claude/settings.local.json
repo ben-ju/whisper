@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmd /c install.bat)",
+      "Bash(where uv:*)",
+      "Bash(uv --version)",
+      "Bash(powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://astral.sh/uv/install.ps1 | iex\")",
+      "Bash(\"$env:USERPROFILE\\\\.local\\\\bin\\\\uv.exe\" venv:*)",
+      "Bash(\"/c/Users/benci/.local/bin/uv.exe\" venv:*)",
+      "Bash(\"/c/Users/benci/.local/bin/uv.exe\" pip:*)",
+      "Bash(powershell -NoProfile -Command \"$ws = New-Object -ComObject WScript.Shell; $desktop = [Environment]::GetFolderPath\\(''Desktop''\\); $sc = $ws.CreateShortcut\\($desktop + ''\\\\CodeWhisper.lnk''\\); $sc.TargetPath = ''C:\\\\Users\\\\benci\\\\Downloads\\\\whisper\\\\run.bat''; $sc.WorkingDirectory = ''C:\\\\Users\\\\benci\\\\Downloads\\\\whisper''; $sc.Description = ''CodeWhisper - Local Speech to Text''; $sc.IconLocation = ''shell32.dll,168''; $sc.WindowStyle = 7; $sc.Save\\(\\); Write-Host ''Shortcut created.''\")",
+      "Bash(powershell -NoProfile:*)"
+    ]
+  }
+}

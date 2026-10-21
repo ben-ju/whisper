@@ -1,117 +1,96 @@
 @echo off
 setlocal EnableDelayedExpansion
+cd /d "%~dp0"
+title CodeWhisper - Installation
 
 echo ============================================================
-echo  CodeWhisper -- Setup
+echo  CodeWhisper - Installation
 echo ============================================================
 echo.
 
-:: ── 1. Find uv (or download it — no Python needed) ───────────────────────────
-set UV=
-
+rem --- 1. Find uv, or download it -------------------------------------------
+set "UV="
 for %%U in (
+    "%USERPROFILE%\.local\bin\uv.exe"
+    "%LOCALAPPDATA%\uv\bin\uv.exe"
+    "%APPDATA%\uv\bin\uv.exe"
+    "%USERPROFILE%\.cargo\bin\uv.exe"
     "%LOCALAPPDATA%\Programs\Anki\uv.exe"
-    "%LOCALAPPDATA%\uv\bin\uv.exe"
-    "%APPDATA%\uv\bin\uv.exe"
-    "%USERPROFILE%\.local\bin\uv.exe"
-    "%USERPROFILE%\.cargo\bin\uv.exe"
 ) do (
-    if exist %%U (
-        set "UV=%%~U"
-        goto :got_uv
-    )
+    if not defined UV if exist %%U set "UV=%%~U"
 )
-
-where uv >nul 2>&1
-if %errorlevel% equ 0 (
-    set UV=uv
-    goto :got_uv
+if not defined UV (
+    where uv >nul 2>&1
+    if !errorlevel! equ 0 set "UV=uv"
 )
+if defined UV goto got_uv
 
-echo [INFO] uv not found -- downloading it now (this is a one-time step)...
-echo.
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "irm https://astral.sh/uv/install.ps1 | iex"
-if %errorlevel% neq 0 (
-    echo.
-    echo [ERROR] Could not download uv. Check your internet connection.
-    echo         Manual install: https://docs.astral.sh/uv/
-    pause
-    exit /b 1
-)
-
-:: uv installer puts the binary here on Windows
-for %%U in (
-    "%USERPROFILE%\.local\bin\uv.exe"
-    "%LOCALAPPDATA%\uv\bin\uv.exe"
-    "%APPDATA%\uv\bin\uv.exe"
-    "%USERPROFILE%\.cargo\bin\uv.exe"
-) do (
-    if exist %%U (
-        set "UV=%%~U"
-        goto :got_uv
-    )
-)
-
-echo [ERROR] uv was installed but the binary could not be located.
-echo         Close this window, open a new terminal, and re-run install.bat.
-pause
-exit /b 1
+echo [INFO] uv introuvable, telechargement - une seule fois...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
+if exist "%USERPROFILE%\.local\bin\uv.exe" set "UV=%USERPROFILE%\.local\bin\uv.exe"
+if defined UV goto got_uv
+echo [ERREUR] Impossible d'installer uv. Verifie ta connexion internet.
+echo          Installation manuelle : https://docs.astral.sh/uv/
+goto fail
 
 :got_uv
-echo [OK] uv found: %UV%
+echo [OK] uv : %UV%
 echo.
 
-:: ── 2. Create virtual environment ────────────────────────────────────────────
-::       uv will automatically download Python 3.11 if it is not on this machine
-if exist "%~dp0.venv\Scripts\python.exe" (
-    echo [OK] Virtual environment already exists.
-) else (
-    echo [INFO] Creating virtual environment (uv will download Python if needed)...
-    "%UV%" venv "%~dp0.venv" --python 3.11
-    if !errorlevel! neq 0 (
-        echo [ERROR] Could not create virtual environment.
-        pause
-        exit /b 1
-    )
-    echo [OK] Virtual environment ready.
+rem --- 2. Virtual environment ------------------------------------------------
+if exist ".venv\Scripts\python.exe" goto venv_ok
+echo [INFO] Creation de l'environnement Python - uv telecharge Python 3.11 si besoin...
+"%UV%" venv ".venv" --python 3.11
+if errorlevel 1 (
+    echo [ERREUR] Impossible de creer l'environnement virtuel.
+    goto fail
 )
+:venv_ok
+echo [OK] Environnement Python pret.
 echo.
 
-:: ── 3. Install Python packages ────────────────────────────────────────────────
-echo [INFO] Installing packages (first run may take a few minutes)...
-"%UV%" pip install -r "%~dp0requirements.txt" --python "%~dp0.venv\Scripts\python.exe"
-if !errorlevel! neq 0 (
-    echo [ERROR] Package installation failed.
-    pause
-    exit /b 1
+rem --- 3. Packages -------------------------------------------------------------
+echo [INFO] Installation des paquets - quelques minutes la premiere fois...
+"%UV%" pip install -r requirements.txt --python ".venv\Scripts\python.exe"
+if errorlevel 1 (
+    echo [ERREUR] L'installation des paquets a echoue. Lis le message ci-dessus.
+    goto fail
 )
-echo [OK] Packages installed.
+echo [OK] Paquets installes.
 echo.
 
-:: ── 4. Desktop shortcut ───────────────────────────────────────────────────────
-echo [INFO] Creating desktop shortcut...
-powershell -NoProfile -Command ^
+rem --- 4. Shortcuts: Desktop + Start menu -----------------------------------
+echo [INFO] Creation des raccourcis Bureau et menu Demarrer...
+set "PS_TARGET=%~dp0.venv\Scripts\pythonw.exe"
+set "PS_DIR=%~dp0"
+set "PS_ICON=%~dp0codewhisper\assets\codewhisper.ico"
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$ws = New-Object -ComObject WScript.Shell;" ^
-    "$desktop = [Environment]::GetFolderPath('Desktop');" ^
-    "$sc = $ws.CreateShortcut($desktop + '\CodeWhisper.lnk');" ^
-    "$sc.TargetPath = '%~dp0run.bat';" ^
-    "$sc.WorkingDirectory = '%~dp0';" ^
-    "$sc.Description = 'CodeWhisper - Local Speech to Text';" ^
-    "$sc.IconLocation = 'shell32.dll,168';" ^
-    "$sc.WindowStyle = 7;" ^
-    "$sc.Save()"
-echo [OK] Desktop shortcut created.
+    "$places = @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'));" ^
+    "foreach ($p in $places) {" ^
+    "  $sc = $ws.CreateShortcut((Join-Path $p 'CodeWhisper.lnk'));" ^
+    "  $sc.TargetPath = $env:PS_TARGET;" ^
+    "  $sc.Arguments = 'app.py';" ^
+    "  $sc.WorkingDirectory = $env:PS_DIR;" ^
+    "  $sc.Description = 'CodeWhisper - dictee vocale';" ^
+    "  $sc.IconLocation = $env:PS_ICON + ',0';" ^
+    "  $sc.Save() }"
+echo [OK] Raccourcis crees.
 echo.
 
-:: ── 5. Done ───────────────────────────────────────────────────────────────────
+rem --- 5. Done -------------------------------------------------------------------
 echo ============================================================
-echo  Done! Use the Desktop shortcut or run.bat to launch.
-echo.
-echo  NOTE: First launch downloads the Whisper model.
-echo    large-v3  ~1.5 GB  (best quality, needs a decent CPU)
-echo    small.en   ~500 MB  (faster, great for weaker machines)
-echo  Change MODEL_SIZE in app.py before first launch if needed.
+echo  Termine ! CodeWhisper demarre.
+echo  Ensuite : raccourci CodeWhisper sur le Bureau ou dans le menu Demarrer.
+echo  Le premier lancement telecharge le modele Whisper choisi.
 echo ============================================================
 echo.
+start "" ".venv\Scripts\pythonw.exe" app.py
+timeout /t 8
+exit /b 0
+
+:fail
+echo.
+echo L'installation n'est pas terminee.
 pause
+exit /b 1
