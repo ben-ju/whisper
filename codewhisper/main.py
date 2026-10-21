@@ -34,7 +34,7 @@ HALLUCINATIONS = {
     "thank you for watching", "thanks for watching", "you", "…",
 }
 
-RELOAD_KEYS = {"stt.provider", "stt.local_model", "stt.custom_local_model", "stt.device"}
+RELOAD_KEYS = {"stt.provider", "stt.local_model", "stt.custom_local_model", "stt.device", "stt.gpu_server"}
 
 
 def _norm(text: str) -> str:
@@ -145,6 +145,7 @@ class App(QObject):
     def quit(self):
         self.quitting = True
         self.recorder.active = False
+        self.engine.shutdown()      # stops whisper-server and frees the VRAM
         self.tray.hide()
         self.pill.hide()
         if self.window is not None:
@@ -185,7 +186,7 @@ class App(QObject):
         if kind == "loading":
             self._show("loading", f"Chargement de {text}…")
         elif kind == "downloading":
-            size = next((m["size"] for m in LOCAL_MODELS if m["name"] == text), "")
+            size = next((m["size"] for m in LOCAL_MODELS if text in (m["name"], f"{m['name']} · GPU")), "")
             self._show("loading", f"Téléchargement de {text}" + (f" ({size})…" if size else "…"))
         elif kind == "ready":
             if self.pill.state == "loading":
@@ -375,6 +376,11 @@ class App(QObject):
             a.triggered.connect(lambda _=False, mid=model["id"]: self._pick_local(mid))
             group.addAction(a)
             stt.addAction(a)
+        stt.addSeparator()
+        gpu = QAction("Calculer sur la carte graphique", stt, checkable=True)
+        gpu.setChecked(self.config.get("stt.device") == "gpu")
+        gpu.triggered.connect(lambda on: self.config.set("stt.device", "gpu" if on else "cpu"))
+        stt.addAction(gpu)
         stt.addSeparator()
         for name in ("groq", "openai", "custom"):
             conf = self.config.get(f"stt.providers.{name}")

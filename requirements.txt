@@ -5,3 +5,4 @@ pyperclip>=1.8.2
 numpy>=1.24.0
 PySide6-Essentials>=6.6
 requests>=2.31
+zstandard>=0.22

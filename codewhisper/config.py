@@ -21,8 +21,11 @@ LOG_FILE = DATA_DIR / "codewhisper.log"
 
 SAMPLE_RATE = 16000
 
-# ─── Local Whisper models (faster-whisper) ────────────────────────────────────
-# speed / quality are 1–5, measured on a CPU with int8 quantisation.
+# ─── Local Whisper models ─────────────────────────────────────────────────────
+# The same models run either on the graphics card (whisper.cpp + Vulkan, any
+# AMD / NVIDIA / Intel GPU) or on the CPU (faster-whisper, int8).
+# speed / quality are 1–5, measured on a CPU with int8 quantisation; on the GPU
+# every model is several times faster.
 LOCAL_MODELS = [
     {"id": "tiny",           "name": "Tiny",           "size": "75 Mo",  "speed": 5, "quality": 1,
      "note": "Instantané, mais fait beaucoup d'erreurs."},
@@ -40,6 +43,30 @@ LOCAL_MODELS = [
      "note": "Rapide et précis, mais anglais uniquement.", "english_only": True},
 ]
 LOCAL_MODEL_IDS = {m["id"] for m in LOCAL_MODELS}
+
+# ─── GPU engine: whisper.cpp server, Vulkan backend ───────────────────────────
+WHISPERCPP_DIR = DATA_DIR / "whispercpp"
+_GGML = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
+GGML_MODELS = {   # model id → ggml weights (same models, whisper.cpp format)
+    "tiny": _GGML + "ggml-tiny.bin",
+    "base": _GGML + "ggml-base.bin",
+    "small": _GGML + "ggml-small.bin",
+    "medium": _GGML + "ggml-medium.bin",
+    "large-v3-turbo": _GGML + "ggml-large-v3-turbo.bin",
+    "large-v3": _GGML + "ggml-large-v3.bin",
+    "distil-large-v3": "https://huggingface.co/distil-whisper/distil-large-v3-ggml/resolve/main/"
+                       "ggml-distil-large-v3.bin",
+}
+# Silero voice-activity detection, the equivalent of faster-whisper's vad_filter.
+VAD_MODEL_URL = "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin"
+
+DEVICES = [
+    ("gpu", "Carte graphique (Vulkan)"),
+    ("cpu", "Processeur (CPU)"),
+    ("cuda", "Carte NVIDIA (CUDA)"),
+    ("auto", "Automatique (NVIDIA, sinon CPU)"),
+]
+DEVICE_LABELS = dict(DEVICES)
 
 # ─── Speech-to-text providers ─────────────────────────────────────────────────
 STT_PROVIDERS = {
@@ -138,13 +165,16 @@ LANGUAGES = [
 ]
 LANG_LABELS = dict(LANGUAGES)
 
+SETTINGS_VERSION = 3
+
 DEFAULTS = {
-    "version": 2,
+    "version": SETTINGS_VERSION,
     "stt": {
         "provider": "local",
-        "local_model": "medium",
+        "local_model": "large-v3-turbo",
         "custom_local_model": "",
-        "device": "cpu",
+        "device": "gpu",           # gpu (whisper.cpp/Vulkan) | cpu | cuda | auto (faster-whisper)
+        "gpu_server": "",          # optional path to your own whisper-server.exe
         "beam_size": 5,
         "providers": {
             "groq":   {"key": "", "model": "whisper-large-v3-turbo"},
@@ -209,6 +239,20 @@ class Config:
         self.data = _deep_merge(DEFAULTS, data)
         if self.first_run:
             self.save()
+        elif data.get("version", 0) < SETTINGS_VERSION:
+            self._migrate(data.get("version", 0))
+
+    def _migrate(self, old: int) -> None:
+        stt = self.data["stt"]
+        if old < 3:
+            # v3 adds the graphics-card engine: move CPU users onto it, with the
+            # model that is both the best and, on a GPU, fast.
+            if stt.get("device") == "cpu":
+                stt["device"] = "gpu"
+                if not stt.get("custom_local_model") and stt.get("local_model") in ("tiny", "base", "small", "medium"):
+                    stt["local_model"] = "large-v3-turbo"
+        self.data["version"] = SETTINGS_VERSION
+        self.save()
 
     # ── access ────────────────────────────────────────────────────────────────
     def get(self, path: str, default=None):
@@ -248,10 +292,8 @@ class Config:
         provider = self.get("stt.provider")
         if provider == "local":
             model = self.local_model_id()
-            for m in LOCAL_MODELS:
-                if m["id"] == model:
-                    return m["name"]
-            return model
+            name = next((m["name"] for m in LOCAL_MODELS if m["id"] == model), model)
+            return f"{name} · GPU" if self.get("stt.device") == "gpu" else name
         model = self.get(f"stt.providers.{provider}.model") or "?"
         return f"{STT_PROVIDERS[provider]['label']} · {model}"
 

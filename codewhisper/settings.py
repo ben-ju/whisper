@@ -11,9 +11,9 @@ from PySide6.QtWidgets import (QComboBox, QFrame, QGridLayout, QHBoxLayout, QLin
                                QStackedWidget, QVBoxLayout, QWidget)
 
 from . import audio, hotkeys, theme, winutil
-from .config import (DATA_DIR, DEFAULT_CLEANUP_PROMPT, LANG_LABELS, LANGUAGES, LLM_PROVIDERS,
-                     LOCAL_MODELS, STT_PROVIDERS)
-from .engines import LocalWhisper, list_remote_models
+from .config import (DATA_DIR, DEFAULT_CLEANUP_PROMPT, DEVICES, LANG_LABELS, LANGUAGES, LLM_PROVIDERS,
+                     LOCAL_MODELS, STT_PROVIDERS, WHISPERCPP_DIR)
+from .engines import list_remote_models, model_downloaded
 from .widgets import (BrandMark, Dot, Keycaps, ModelTile, Panel, Segmented, Toggle, hbox, label,
                       run_async)
 
@@ -194,6 +194,13 @@ class SettingsWindow(QMainWindow):
             self.home_dot.set_color(color)
             self.home_status.setText(msg)
         self._refresh_tiles()
+        if kind in ("ready", "error") and getattr(self, "_sync_device_rows", None):
+            try:
+                self._sync_device_rows()
+                if kind == "ready":
+                    self._check_downloads()
+            except RuntimeError:  # widgets deleted during a rebuild
+                pass
 
     # ══ Home ═════════════════════════════════════════════════════════════════
     def _build_home(self):
@@ -329,24 +336,65 @@ class SettingsWindow(QMainWindow):
         v.addLayout(grid)
 
         panel = Panel()
-        device = _combo([("cpu", "Processeur (CPU)"), ("cuda", "Carte NVIDIA (CUDA)"), ("auto", "Automatique")],
-                        self.cfg.get("stt.device"))
-        device.currentIndexChanged.connect(lambda: self.cfg.set("stt.device", device.currentData()))
-        panel.add_row("Calcul", "Les cartes AMD ne sont pas prises en charge par faster-whisper : "
-                                "garde le CPU.", device)
+        device = _combo(DEVICES, self.cfg.get("stt.device"))
+        device_row = panel.add_row("Calcul", self._device_hint(), device)
+        self.device_row = device_row
+
         custom = QLineEdit(self.cfg.get("stt.custom_local_model"))
-        custom.setPlaceholderText("ex. bofenghuang/whisper-large-v3-french-distil-dec16")
         custom.setMinimumWidth(320)
+        custom_row = panel.add_row("Autre modèle", "Prend le pas sur la sélection ci-dessus.", custom, stacked=True)
+
+        server = QLineEdit(self.cfg.get("stt.gpu_server"))
+        server.setPlaceholderText("Vide = installé automatiquement par CodeWhisper")
+        server.setMinimumWidth(320)
+        server.editingFinished.connect(lambda: self.cfg.set("stt.gpu_server", server.text().strip()))
+        logs = QPushButton("Dossier du moteur")
+        logs.setObjectName("Ghost")
+        logs.setToolTip("Modèles, binaires et journal (server.log) du moteur GPU")
+        logs.clicked.connect(lambda: winutil.open_folder(WHISPERCPP_DIR))
+        server_row = panel.add_row(
+            "Moteur GPU", "whisper.cpp (Vulkan) est téléchargé au premier usage depuis le dépôt MSYS2. "
+                          "Tu peux indiquer ton propre whisper-server.exe à la place.",
+            hbox(server, logs, spacing=6), stacked=True)
+
+        def sync_device_rows():
+            gpu = self.cfg.get("stt.device") == "gpu"
+            custom.setPlaceholderText("Fichier ggml .bin ou adresse https://…/ggml-xxx.bin" if gpu
+                                      else "ex. bofenghuang/whisper-large-v3-french-distil-dec16")
+            custom_row.desc.setText(
+                ("Modèle au format whisper.cpp (ggml). " if gpu else
+                 "Identifiant Hugging Face (format CTranslate2) ou dossier local. ")
+                + "Prend le pas sur la sélection ci-dessus.")
+            server_row.setVisible(gpu)
+            device_row.desc.setText(self._device_hint())
+
+        def on_device():
+            self.cfg.set("stt.device", device.currentData())
+            sync_device_rows()
+            self._check_downloads()
+        device.currentIndexChanged.connect(on_device)
 
         def apply_custom():
             self.cfg.set("stt.custom_local_model", custom.text().strip())
             self._refresh_tiles()
         custom.editingFinished.connect(apply_custom)
-        panel.add_row("Autre modèle", "Identifiant Hugging Face (format CTranslate2) ou dossier local. "
-                                      "Prend le pas sur la sélection ci-dessus.", custom, stacked=True)
         self.custom_model_edit = custom
+        self._sync_device_rows = sync_device_rows
         v.addWidget(panel)
+        sync_device_rows()
         return w
+
+    def _device_hint(self) -> str:
+        dev = self.cfg.get("stt.device")
+        actual = self.app.engine.device_info
+        if dev == "gpu":
+            if self.app.engine.gpu_error:
+                return f"Carte graphique indisponible ({self.app.engine.gpu_error}) : calcul sur le CPU."
+            base = "whisper.cpp + Vulkan : AMD, NVIDIA ou Intel. Plusieurs fois plus rapide que le CPU."
+            return base + (f" En cours : {actual}." if actual else "")
+        if dev == "cpu":
+            return "faster-whisper sur le processeur. Fonctionne partout, mais plus lent."
+        return "faster-whisper avec CUDA : cartes NVIDIA uniquement." + (f" En cours : {actual}." if actual else "")
 
     def _pick_local(self, mid: str):
         self.custom_model_edit.clear()
@@ -369,8 +417,10 @@ class SettingsWindow(QMainWindow):
                 return
 
     def _check_downloads(self):
+        device = self.cfg.get("stt.device")
+
         def scan():
-            return {m["id"]: LocalWhisper.is_downloaded(m["id"]) for m in LOCAL_MODELS}
+            return {m["id"]: model_downloaded(m["id"], device) for m in LOCAL_MODELS}
 
         def done(res):
             if isinstance(res, Exception) or not getattr(self, "tiles", None):
